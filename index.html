@@ -366,7 +366,7 @@
             border-color: rgba(255, 100, 100, 0.5);
             color: #ffdddd;
           "
-          onclick="gameInstance.restartLevel('REINICIO MANUAL')"
+          onclick="gameInstance.restartLevel('REINICIO MANUAL', true)"
         >
           REINICIAR
         </button>
@@ -408,6 +408,8 @@
         PLAYER: {
           COLLISION_RADIUS: 25, // Tamaño físico para chocar
           VISUAL_RADIUS: 8, // Tamaño base del dibujo
+          COYOTE_TICKS: 6, // Ticks que aún puedes saltar tras salir del borde (6 = 0.1 s)
+          JUMP_BUFFER_TICKS: 6, // Ticks que se "recuerda" un salto pulsado antes de tocar suelo
         },
         LEVEL: {
           DEATH_Y: 2000, // Altura a la que mueres si caes
@@ -500,6 +502,11 @@
         }
         playDamage() {
           this.playTone(100, "sawtooth", 0.1, 0.3, -50);
+        }
+        playCheckpoint() {
+          this.playTone(440, "sine", 0.3, 0.3);
+          setTimeout(() => this.playTone(660, "sine", 0.3, 0.3), 80);
+          setTimeout(() => this.playTone(880, "sine", 0.5, 0.25), 160);
         }
         playDeath() {
           if (!this.initialized) return;
@@ -973,6 +980,46 @@
         }
       }
 
+      // PUNTOS DE CONTROL (Checkpoints): al tocarlos, reapareces ahí al morir
+      class Checkpoint {
+        constructor(x, y) {
+          this.pos = { x, y };
+          this.active = false;
+          this.radius = 50; // Distancia para activarlo
+        }
+        checkCollision(player) {
+          return V2.dist(player.pos, this.pos) < this.radius;
+        }
+        draw(ctx, camera) {
+          const sx = this.pos.x - camera.x;
+          const sy = this.pos.y - camera.y;
+          const color = this.active ? "0, 255, 255" : "120, 140, 160";
+          const pulse = this.active ? Math.sin(Date.now() / 300) * 0.3 + 0.7 : 0.4;
+          ctx.save();
+          ctx.translate(sx, sy);
+          // Haz de luz vertical
+          const beamH = this.active ? 120 : 40;
+          const grad = ctx.createLinearGradient(0, 25, 0, 25 - beamH);
+          grad.addColorStop(0, `rgba(${color}, ${0.5 * pulse})`);
+          grad.addColorStop(1, `rgba(${color}, 0)`);
+          ctx.fillStyle = grad;
+          ctx.fillRect(-3, 25 - beamH, 6, beamH);
+          // Rombo
+          ctx.translate(0, -10);
+          ctx.rotate(Math.PI / 4);
+          ctx.shadowBlur = this.active ? 20 : 0;
+          ctx.shadowColor = `rgb(${color})`;
+          ctx.strokeStyle = `rgba(${color}, ${pulse})`;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(-7, -7, 14, 14);
+          if (this.active) {
+            ctx.fillStyle = `rgba(${color}, ${0.4 * pulse})`;
+            ctx.fillRect(-7, -7, 14, 14);
+          }
+          ctx.restore();
+        }
+      }
+
       // META FINAL
       class Goal {
         constructor(x, y) {
@@ -1014,10 +1061,14 @@
       // =========================================
       class Player {
         constructor(x, y) {
-          this.startPos = { x, y };
+          this.startPos = { x, y }; // Inicio del nivel
+          this.respawnPos = { x, y }; // Último checkpoint (o el inicio)
           this.pos = { x, y };
           this.vel = { x: 0, y: 0 };
           this.grounded = false;
+          this.coyoteTimer = 0;
+          this.jumpBufferTimer = 0;
+          this.jumpWasDown = false;
           this.isGrappling = false;
           this.grappleTarget = null;
           this.ropeLength = 0;
@@ -1035,8 +1086,10 @@
           this.scaleY = 1;
         }
         respawn() {
-          this.pos = { ...this.startPos };
+          this.pos = { ...this.respawnPos };
           this.vel = { x: 0, y: 0 };
+          this.coyoteTimer = 0;
+          this.jumpBufferTimer = 0;
           this.isGrappling = false;
           this.grappleTarget = null;
           this.trail = [];
@@ -1161,7 +1214,23 @@
             input.isTouch &&
             !this.isGrappling &&
             !this.grappleTarget;
-          if ((input.keys.up || mobileJump) && this.grounded) {
+          const jumpDown = input.keys.up || mobileJump;
+          const pcfg = CONFIG.PLAYER;
+
+          // Coyote time: tras pisar suelo, el salto sigue disponible unos ticks aunque caigas
+          if (this.grounded) this.coyoteTimer = pcfg.COYOTE_TICKS;
+          else if (this.coyoteTimer > 0) this.coyoteTimer--;
+
+          // Jump buffer: un salto pulsado justo antes de aterrizar se ejecuta al tocar suelo.
+          // Solo cuenta el momento de pulsar (mantener la tecla no encadena saltos).
+          if (jumpDown && !this.jumpWasDown)
+            this.jumpBufferTimer = pcfg.JUMP_BUFFER_TICKS;
+          else if (this.jumpBufferTimer > 0) this.jumpBufferTimer--;
+          this.jumpWasDown = jumpDown;
+
+          if (this.jumpBufferTimer > 0 && this.coyoteTimer > 0) {
+            this.jumpBufferTimer = 0;
+            this.coyoteTimer = 0;
             this.vel.y = cfg.JUMP_FORCE;
             audio.playJump();
             // Aplastamiento previo al salto (Anticipación inversa)
@@ -1538,6 +1607,12 @@
             new HunterDrone(0, -950, 200),
             new HunterDrone(100, -2250, 300),
           ];
+          // Sobre plataformas, lejos de drones y trampas (y = parte superior de la plataforma - 30)
+          this.checkpoints = [
+            new Checkpoint(900, -330),
+            new Checkpoint(550, -1230),
+            new Checkpoint(-125, -1530),
+          ];
         }
         initParallax() {
           this.parallaxLayers.push(
@@ -1566,8 +1641,13 @@
           if (this.paused) this.ui.menu.classList.add("active");
           else this.ui.menu.classList.remove("active");
         }
-        // Devuelve jugador, orbes y drones a su estado inicial (sin sonidos ni mensajes)
-        resetLevel() {
+        // Devuelve jugador, orbes y drones a su estado inicial (sin sonidos ni mensajes).
+        // full = true borra los checkpoints y vuelve al inicio del nivel.
+        resetLevel(full = false) {
+          if (full) {
+            this.checkpoints.forEach((c) => (c.active = false));
+            this.player.respawnPos = { ...this.player.startPos };
+          }
           this.player.respawn();
           this.echoes.forEach((e) => (e.active = true));
           this.drones.forEach((d) => d.reset());
@@ -1585,10 +1665,10 @@
             duration
           );
         }
-        restartLevel(reason = "SEÑAL PERDIDA") {
+        restartLevel(reason = "SEÑAL PERDIDA", full = false) {
           if (this.gameState === "WON") return;
           this.audio.playDeath();
-          this.resetLevel();
+          this.resetLevel(full);
           this.showNotification("ERROR CRÍTICO", reason, "#ff8888");
           if (this.paused) this.togglePause();
         }
@@ -1602,7 +1682,7 @@
             "#88ff88",
             2500
           );
-          setTimeout(() => this.resetLevel(), 3000);
+          setTimeout(() => this.resetLevel(true), 3000);
         }
         update() {
           if (this.paused || this.gameState === "WON") return;
@@ -1622,6 +1702,23 @@
           );
 
           this.drones.forEach((d) => d.update(this.player));
+
+          // Activar checkpoints
+          this.checkpoints.forEach((c) => {
+            if (!c.active && c.checkCollision(this.player)) {
+              c.active = true;
+              this.player.respawnPos = { ...c.pos };
+              this.audio.playCheckpoint();
+              for (let i = 0; i < 25; i++)
+                this.particles.spawnSpark(c.pos.x, c.pos.y, "0, 255, 255", 8);
+              this.showNotification(
+                "SINCRONIZADO",
+                "PUNTO DE RESTAURACIÓN",
+                "#88ffff",
+                1200
+              );
+            }
+          });
 
           this.particles.update();
           if (this.player.pos.y > CONFIG.LEVEL.DEATH_Y)
@@ -1649,6 +1746,7 @@
           );
           this._drawLevel();
           this.goal.draw(this.ctx, this.camera);
+          this.checkpoints.forEach((c) => c.draw(this.ctx, this.camera));
           this.hazards.forEach((h) => h.draw(this.ctx, this.camera));
           this.drones.forEach((d) =>
             d.draw(this.ctx, this.camera, this.player)

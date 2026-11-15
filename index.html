@@ -398,8 +398,11 @@
           MAX_SPEED_X: 10, // Velocidad máxima horizontal
           MAX_SPEED_Y: 15, // Velocidad máxima de caída
           JUMP_FORCE: -13, // Fuerza del salto (Negativo es hacia arriba)
-          GRAPPLE_FORCE: 0.025, // Fuerza con la que te jala el gancho
           GRAPPLE_RANGE: 500, // Distancia máxima para engancharse
+          GRAPPLE_REEL_SPEED: 4, // Cuánto se recoge la cuerda por tick (Mayor = te sube más rápido)
+          GRAPPLE_MIN_LENGTH: 60, // Largo mínimo de la cuerda
+          GRAPPLE_DAMPING: 0.995, // Pérdida de energía al balancearse (1 = péndulo perfecto)
+          MAX_SWING_SPEED: 18, // Velocidad máxima que puede dar el impulso del gancho
           GLIDE_GRAVITY: 0.05, // Gravedad reducida al planear
         },
         PLAYER: {
@@ -1017,6 +1020,8 @@
           this.grounded = false;
           this.isGrappling = false;
           this.grappleTarget = null;
+          this.ropeLength = 0;
+          this.reelRatio = 1;
           this.trail = [];
           this.pulseAnim = 0;
           this.energy = CONFIG.SURVIVAL.MAX_ENERGY;
@@ -1115,9 +1120,17 @@
           });
 
           // Movimiento Horizontal
-          if (input.keys.right) this.vel.x += cfg.MOVE_SPEED;
-          if (input.keys.left) this.vel.x -= cfg.MOVE_SPEED;
-          this.vel.x = V2.clamp(this.vel.x, -cfg.MAX_SPEED_X, cfg.MAX_SPEED_X);
+          // Las teclas solo aceleran hasta MAX_SPEED_X; el impulso del gancho puede superar
+          // ese límite (hasta MAX_SWING_SPEED) para que el lanzamiento tipo honda se sienta.
+          if (input.keys.right && this.vel.x < cfg.MAX_SPEED_X)
+            this.vel.x += cfg.MOVE_SPEED;
+          if (input.keys.left && this.vel.x > -cfg.MAX_SPEED_X)
+            this.vel.x -= cfg.MOVE_SPEED;
+          this.vel.x = V2.clamp(
+            this.vel.x,
+            -cfg.MAX_SWING_SPEED,
+            cfg.MAX_SWING_SPEED
+          );
 
           // Planeo y Gravedad
           this.isGliding = false;
@@ -1139,7 +1152,7 @@
             this.vel.y += cfg.GRAVITY;
           }
 
-          this.vel.y = V2.clamp(this.vel.y, -cfg.MAX_SPEED_Y, cfg.MAX_SPEED_Y);
+          this.vel.y = V2.clamp(this.vel.y, -cfg.MAX_SWING_SPEED, cfg.MAX_SPEED_Y);
           this._handleGrapple(input, level.nodes, camera, audio);
 
           // Salto
@@ -1167,6 +1180,7 @@
           this.pos.x += this.vel.x;
           this.pos.y += this.vel.y;
 
+          this._applyRopeConstraint();
           this._handleCollisions(level.walls);
           this._updateVisuals();
         }
@@ -1186,26 +1200,75 @@
             particles.spawnSpark(this.pos.x, this.pos.y, "255, 50, 0", 10);
         }
 
+        // GANCHO TIPO PÉNDULO
+        // Al engancharte se crea una cuerda de largo fijo. La gravedad te hace balancear,
+        // la cuerda se va recogiendo poco a poco, y al soltar conservas la velocidad (efecto honda).
         _handleGrapple(input, nodes, camera, audio) {
+          const cfg = CONFIG.PHYSICS;
           const worldMouse = input.getWorldMouse(camera);
           if (input.mouse.down) {
             if (!this.isGrappling) {
               this.grappleTarget = this._findBestGrappleNode(worldMouse, nodes);
               if (this.grappleTarget) {
                 this.isGrappling = true;
+                this.ropeLength = Math.max(
+                  cfg.GRAPPLE_MIN_LENGTH,
+                  V2.dist(this.pos, this.grappleTarget.pos)
+                );
                 audio.playGrapple();
               }
             }
             if (this.isGrappling && this.grappleTarget) {
-              const dir = V2.sub(this.grappleTarget.pos, this.pos);
-              this.vel.x += dir.x * CONFIG.PHYSICS.GRAPPLE_FORCE;
-              this.vel.y += dir.y * CONFIG.PHYSICS.GRAPPLE_FORCE;
-              this.vel.x *= 0.99;
-              this.vel.y *= 0.99;
+              // Recoger cuerda poco a poco (el efecto se aplica en _applyRopeConstraint)
+              const oldLength = this.ropeLength;
+              this.ropeLength = Math.max(
+                cfg.GRAPPLE_MIN_LENGTH,
+                this.ropeLength - cfg.GRAPPLE_REEL_SPEED
+              );
+              this.reelRatio = oldLength / this.ropeLength;
+              this.vel.x *= cfg.GRAPPLE_DAMPING;
+              this.vel.y *= cfg.GRAPPLE_DAMPING;
             }
           } else {
             this.isGrappling = false;
             this.grappleTarget = null;
+          }
+        }
+        // Cuando la cuerda está tensa: mantiene al jugador a su largo, separa la velocidad en
+        // radial (hacia/desde el nodo) y tangencial (el balanceo), y las ajusta.
+        _applyRopeConstraint() {
+          if (!this.isGrappling || !this.grappleTarget) return;
+          const cfg = CONFIG.PHYSICS;
+          const anchor = this.grappleTarget.pos;
+          const d = V2.sub(this.pos, anchor);
+          const dist = V2.mag(d);
+          if (dist < this.ropeLength || dist === 0) return; // Cuerda floja: caída libre
+
+          const n = { x: d.x / dist, y: d.y / dist }; // Dirección nodo -> jugador
+          this.pos.x = anchor.x + n.x * this.ropeLength;
+          this.pos.y = anchor.y + n.y * this.ropeLength;
+
+          let radial = this.vel.x * n.x + this.vel.y * n.y; // > 0 = alejándose del nodo
+          let tx = this.vel.x - radial * n.x;
+          let ty = this.vel.y - radial * n.y;
+
+          // La cuerda no deja alejarse; mientras se recoge, te jala hacia el nodo
+          const reeling = this.ropeLength > cfg.GRAPPLE_MIN_LENGTH;
+          radial = Math.min(radial, reeling ? -cfg.GRAPPLE_REEL_SPEED : 0);
+
+          // Conservación del momento angular: radio más corto = giro más rápido
+          // (como un patinador que encoge los brazos)
+          tx *= this.reelRatio;
+          ty *= this.reelRatio;
+
+          this.vel.x = tx + radial * n.x;
+          this.vel.y = ty + radial * n.y;
+
+          // Limitar la velocidad total del balanceo
+          const speed = V2.mag(this.vel);
+          if (speed > cfg.MAX_SWING_SPEED) {
+            this.vel.x *= cfg.MAX_SWING_SPEED / speed;
+            this.vel.y *= cfg.MAX_SWING_SPEED / speed;
           }
         }
         _findBestGrappleNode(mousePos, nodes) {

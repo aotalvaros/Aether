@@ -366,7 +366,7 @@
             border-color: rgba(255, 100, 100, 0.5);
             color: #ffdddd;
           "
-          onclick="gameInstance.restartLevel()"
+          onclick="gameInstance.restartLevel('REINICIO MANUAL')"
         >
           REINICIAR
         </button>
@@ -387,6 +387,9 @@
       // CONFIGURACIÓN GLOBAL (Modifica esto para cambiar el juego)
       // =========================================
       const CONFIG = {
+        // La lógica corre a paso fijo: todos los valores "por tick" asumen 60 ticks por segundo,
+        // sin importar los Hz del monitor (60, 120, 144...).
+        TICK_RATE: 60,
         PHYSICS: {
           GRAVITY: 0.35, // Qué tan fuerte cae el personaje (Menor = más flotante)
           FRICTION_GROUND: 0.9, // Fricción en el suelo (Menor = más resbaladizo)
@@ -415,10 +418,10 @@
         },
         SURVIVAL: {
           MAX_ENERGY: 100, // Vida total
-          DECAY_RATE: 0.03, // Cuánta vida pierdes por segundo automáticamente
+          DECAY_RATE: 0.03, // Vida que pierdes por tick automáticamente (x60 = 1.8 por segundo)
           ECHO_RECHARGE: 30, // Cuánta vida recuperan los orbes azules
           HAZARD_DAMAGE: 30, // Daño de trampas rojas
-          DRONE_DAMAGE: 1, // Daño por tick del drone
+          DRONE_DAMAGE: 1, // Daño por tick mientras el drone te toca (x60 = 60 por segundo)
         },
       };
 
@@ -810,6 +813,7 @@
       // DRONES CAZADORES (IA)
       class HunterDrone {
         constructor(x, y, patrolRange) {
+          this.origin = { x, y }; // Posición inicial original (no cambia, se usa al reiniciar)
           this.startPos = { x, y };
           this.pos = { x, y };
           this.patrolRange = patrolRange;
@@ -820,6 +824,14 @@
           this.patrolDir = 1;
           this.radius = 18;
           this.angle = 0;
+        }
+
+        // Devuelve el drone a su estado inicial (al reiniciar el nivel)
+        reset() {
+          this.startPos = { ...this.origin };
+          this.pos = { ...this.origin };
+          this.state = "PATROL";
+          this.patrolDir = 1;
         }
 
         update(player) {
@@ -1231,11 +1243,13 @@
               if (Math.abs(nx) > Math.abs(ny)) {
                 this.vel.x = 0;
               } else {
+                // Guardamos la velocidad del impacto ANTES de anularla
+                const impactVelY = this.vel.y;
                 this.vel.y = 0;
                 if (ny < 0) {
                   this.grounded = true;
                   // Aplastamiento fuerte al caer desde alto
-                  if (Math.abs(this.vel.y) > 5) {
+                  if (impactVelY > 5) {
                     this.scaleY = 0.6;
                     this.scaleX = 1.4;
                   }
@@ -1366,6 +1380,10 @@
           this.drones = [];
           this.paused = true;
           this.gameState = "PLAYING";
+          // Bucle de paso fijo
+          this.lastTime = null;
+          this.accumulator = 0;
+          this.notifTimer = null;
 
           // Definición del Nivel (Plataformas y Nodos)
           this.level = {
@@ -1485,28 +1503,46 @@
           if (this.paused) this.ui.menu.classList.add("active");
           else this.ui.menu.classList.remove("active");
         }
-        restartLevel(reason = "SEÑAL PERDIDA") {
-          this.audio.playDeath();
+        // Devuelve jugador, orbes y drones a su estado inicial (sin sonidos ni mensajes)
+        resetLevel() {
           this.player.respawn();
-          this.gameState = "PLAYING";
           this.echoes.forEach((e) => (e.active = true));
-          document.getElementById("notif-title").innerText = "ERROR CRÍTICO";
-          document.getElementById("notif-sub").innerText =
-            "/// " + reason + " ///";
+          this.drones.forEach((d) => d.reset());
+          this.gameState = "PLAYING";
+        }
+        showNotification(title, sub, subColor, duration = 2000) {
+          document.getElementById("notif-title").innerText = title;
+          const subEl = document.getElementById("notif-sub");
+          subEl.innerText = "/// " + sub + " ///";
+          subEl.style.color = subColor;
           this.ui.notif.classList.add("visible");
-          setTimeout(() => this.ui.notif.classList.remove("visible"), 2000);
+          clearTimeout(this.notifTimer);
+          this.notifTimer = setTimeout(
+            () => this.ui.notif.classList.remove("visible"),
+            duration
+          );
+        }
+        restartLevel(reason = "SEÑAL PERDIDA") {
+          if (this.gameState === "WON") return;
+          this.audio.playDeath();
+          this.resetLevel();
+          this.showNotification("ERROR CRÍTICO", reason, "#ff8888");
           if (this.paused) this.togglePause();
         }
         winLevel() {
           if (this.gameState === "WON") return;
-          this.gameState = "WON";
-          this.paused = true;
+          this.gameState = "WON"; // Congela la lógica mientras se muestra el mensaje
           this.audio.playWin();
-          alert("¡SINCRONIZACIÓN EXITOSA! Has conectado el núcleo.");
-          this.restartLevel("REINICIO DE SISTEMA");
+          this.showNotification(
+            "SINCRONIZACIÓN EXITOSA",
+            "NÚCLEO CONECTADO",
+            "#88ff88",
+            2500
+          );
+          setTimeout(() => this.resetLevel(), 3000);
         }
         update() {
-          if (this.paused) return;
+          if (this.paused || this.gameState === "WON") return;
           if (this.goal.checkCollision(this.player)) {
             this.winLevel();
             return;
@@ -1703,8 +1739,19 @@
             }
           });
         }
-        loop() {
-          this.update();
+        // Bucle de paso fijo: la lógica avanza siempre a CONFIG.TICK_RATE ticks por segundo,
+        // y el dibujo ocurre en cada frame del monitor.
+        loop(timestamp) {
+          const step = 1000 / CONFIG.TICK_RATE;
+          if (this.lastTime === null) this.lastTime = timestamp;
+          // Limitar a 250 ms para no "ponerse al día" de golpe al volver de otra pestaña
+          const frameTime = Math.min(timestamp - this.lastTime, 250);
+          this.lastTime = timestamp;
+          this.accumulator += frameTime;
+          while (this.accumulator >= step) {
+            this.update();
+            this.accumulator -= step;
+          }
           this.draw();
           requestAnimationFrame(this.loop);
         }
@@ -1715,7 +1762,7 @@
         loadAssets(() => {
           gameInstance = new Game();
           gameInstance.initParallax();
-          gameInstance.loop();
+          requestAnimationFrame(gameInstance.loop);
         });
       };
     </script>

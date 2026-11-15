@@ -412,7 +412,7 @@
           JUMP_BUFFER_TICKS: 6, // Ticks que se "recuerda" un salto pulsado antes de tocar suelo
         },
         LEVEL: {
-          DEATH_Y: 2000, // Altura a la que mueres si caes
+          DEATH_Y: 1200, // Altura a la que mueres si caes
           BACKGROUND: "#010103", // Color de fondo del canvas
         },
         CAMERA: {
@@ -428,6 +428,84 @@
           HAZARD_DAMAGE: 30, // Daño de trampas rojas
           DRONE_DAMAGE: 1, // Daño por tick mientras el drone te toca (x60 = 60 por segundo)
         },
+      };
+
+      // =========================================
+      // DISEÑO DEL NIVEL (Modifica esto para cambiar el mapa)
+      // Coordenadas del mundo: Y crece hacia ABAJO. El jugador de pie queda 25 px sobre la plataforma.
+      // Validable con: node tools/validate_level.js
+      // =========================================
+      const LEVEL_DATA = {
+        start: { x: 0, y: 450 },
+        goal: { x: 6950, y: -1320 },
+        // Plataformas: [x, y (borde superior), ancho, alto]
+        walls: [
+          [-500, -600, 100, 1200], // Pared izquierda
+          // --- ZONA 1: EL DESPERTAR (tutorial, sin caídas mortales) ---
+          [-400, 500, 3500, 100], // Suelo continuo (termina en el primer abismo)
+          [1000, 420, 250, 30], // Escalón 1 (opcional)
+          [1350, 320, 250, 30], // Escalón 2 (opcional, orbe arriba)
+          [1700, 420, 400, 80], // Bloque: obliga a saltar
+          // --- ZONA 2: EL ABISMO (gancho obligatorio) ---
+          [3600, 500, 300, 100], // Isla A
+          [4700, 450, 250, 30], // Isla B
+          [5200, 250, 200, 30], // Isla C (lección de planeo)
+          [6150, 350, 350, 30], // Isla D (inicio de la zona 3)
+          // --- ZONA 3: LA COLMENA (escape de drones, subida vertical) ---
+          [6500, 500, 550, 100], // Suelo de seguridad bajo la subida
+          [6650, 200, 200, 30], // Z1 (cada escalón sube 150 px; el salto máximo es ~240)
+          [6300, 50, 200, 30], // Z2
+          [6700, -100, 200, 30], // Z3
+          [6300, -250, 200, 30], // Z4
+          [6700, -400, 250, 30], // Z5
+          [6700, -1250, 350, 40], // Plataforma final (meta)
+          [7050, -1900, 100, 2500], // Pared derecha
+        ],
+        // Nodos de gancho: [x, y]
+        nodes: [
+          [3350, 250], // Primer abismo
+          [4100, 200],
+          [4450, 180],
+          [5050, 50],
+          [5600, 0], // Antes del planeo
+          [6500, -700], // Cadena final
+          [6800, -1000],
+          [6600, -1350],
+        ],
+        // Orbes de energía: [x, y]
+        echoes: [
+          [1475, 270], [2400, 420], [2850, 420], [4280, 380], [5300, 180], [5850, 150],
+          [6500, -170], [6650, -750], [6850, -1100],
+        ],
+        // Trampas: [x, y, ancho, alto]
+        hazards: [
+          [2550, 470, 80, 30], // Lección: saltar la energía roja
+          [6850, -130, 50, 30], // Borde derecho de Z3
+          [6300, -280, 50, 30], // Borde izquierdo de Z4
+        ],
+        // Drones: [x, y, rango de patrulla]
+        drones: [
+          [6550, 120, 150],
+          [6550, -180, 150],
+          [6650, -850, 200],
+        ],
+        // Checkpoints: [x, y] (y = borde superior de la plataforma - 30)
+        checkpoints: [
+          [2900, 470], // Antes del primer abismo
+          [3750, 470], // Isla A
+          [6200, 320], // Isla D (fuera de la vista del primer drone)
+          [6850, -430], // Z5, antes de la cadena final
+        ],
+        // Carteles del tutorial: [x, y, texto]
+        signs: [
+          [100, 380, "A / D  —  MOVERSE"],
+          [780, 380, "ESPACIO  —  SALTAR"],
+          [2400, 340, "LOS ORBES RECARGAN TU ENERGÍA  ·  EVITA LO ROJO"],
+          [3000, 320, "CLICK EN UN NODO  —  GANCHO DE LUZ"],
+          [3750, 380, "SUELTA EN LA SUBIDA PARA SALIR DISPARADO"],
+          [5300, 140, "TRAS EL GANCHO, MANTÉN ESPACIO PARA PLANEAR"],
+          [6250, 260, "LOS DRONES TE PERSIGUEN  ·  NO TE DETENGAS"],
+        ],
       };
 
       // --- Utilidades Matemáticas (Vectores 2D) ---
@@ -1036,6 +1114,28 @@
         }
       }
 
+      // CARTELES DEL TUTORIAL (texto en el mundo que aparece al acercarse)
+      class Sign {
+        constructor(x, y, text) {
+          this.pos = { x, y };
+          this.text = text;
+        }
+        draw(ctx, camera, player) {
+          const d = V2.dist(this.pos, player.pos);
+          const alpha = V2.clamp(1 - (d - 250) / 350, 0, 1);
+          if (alpha <= 0) return;
+          ctx.save();
+          ctx.globalAlpha = alpha * 0.85;
+          ctx.font = "600 13px 'Segoe UI', sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillStyle = "#d4f0ff";
+          ctx.shadowBlur = 12;
+          ctx.shadowColor = "rgba(0, 255, 255, 0.6)";
+          ctx.fillText(this.text, this.pos.x - camera.x, this.pos.y - camera.y);
+          ctx.restore();
+        }
+      }
+
       // META FINAL
       class Goal {
         constructor(x, y) {
@@ -1583,7 +1683,7 @@
           this.width = window.innerWidth;
           this.height = window.innerHeight;
           this.input = new InputHandler(this.canvas);
-          this.player = new Player(0, 450);
+          this.player = new Player(LEVEL_DATA.start.x, LEVEL_DATA.start.y);
           this.camera = new Camera(0, 0);
           this.parallaxLayers = [];
           this.particles = new ParticleSystem();
@@ -1598,38 +1698,13 @@
           this.accumulator = 0;
           this.notifTimer = null;
 
-          // Definición del Nivel (Plataformas y Nodos)
+          // Nivel construido desde LEVEL_DATA
           this.level = {
-            walls: [
-              { x: -500, y: 500, w: 2000, h: 100 },
-              { x: 300, y: 300, w: 200, h: 30 },
-              { x: 800, y: 150, w: 150, h: 30 },
-              { x: 1200, y: -500, w: 50, h: 1000 },
-              { x: 1250, y: 0, w: 200, h: 30 },
-              { x: 800, y: -300, w: 200, h: 30 },
-              { x: 400, y: -600, w: 150, h: 30 },
-              { x: 0, y: -900, w: 200, h: 30 },
-              { x: 500, y: -1200, w: 100, h: 30 },
-              { x: -200, y: -1500, w: 150, h: 30 },
-              { x: 100, y: -2200, w: 300, h: 30 },
-              { x: -300, y: -2800, w: 600, h: 50 },
-            ],
-            nodes: [
-              { pos: { x: 500, y: 150 }, radius: 15 },
-              { pos: { x: 1000, y: -100 }, radius: 15 },
-              { pos: { x: 1400, y: -300 }, radius: 15 },
-              { pos: { x: 900, y: -500 }, radius: 15 },
-              { pos: { x: 200, y: -800 }, radius: 15 },
-              { pos: { x: -100, y: -1100 }, radius: 15 },
-              { pos: { x: 600, y: -1300 }, radius: 15 },
-              { pos: { x: 200, y: -1700 }, radius: 15 },
-              { pos: { x: 0, y: -2000 }, radius: 15 },
-              { pos: { x: 200, y: -2400 }, radius: 15 },
-              { pos: { x: -100, y: -2600 }, radius: 15 },
-            ],
+            walls: LEVEL_DATA.walls.map(([x, y, w, h]) => ({ x, y, w, h })),
+            nodes: LEVEL_DATA.nodes.map(([x, y]) => ({ pos: { x, y }, radius: 15 })),
           };
 
-          this.goal = new Goal(0, -2900);
+          this.goal = new Goal(LEVEL_DATA.goal.x, LEVEL_DATA.goal.y);
 
           // Referencias al HTML
           this.ui = {
@@ -1665,35 +1740,12 @@
         }
 
         _setupLevelEntities() {
-          // Crear objetos del nivel
-          this.echoes = [
-            new Echo(500, 50),
-            new Echo(1100, -150),
-            new Echo(800, -450),
-            new Echo(300, -700),
-            new Echo(100, -1100),
-            new Echo(400, -1600),
-            new Echo(0, -2100),
-            new Echo(-100, -2500),
-          ];
-          this.hazards = [
-            new Hazard(400, 250, 100, 20),
-            new Hazard(1150, -400, 20, 300),
-            new Hazard(600, -550, 50, 50),
-            new Hazard(100, -1400, 200, 20),
-            new Hazard(-150, -1900, 50, 200),
-          ];
-          this.drones = [
-            new HunterDrone(1250, -50, 150),
-            new HunterDrone(0, -950, 200),
-            new HunterDrone(100, -2250, 300),
-          ];
-          // Sobre plataformas, lejos de drones y trampas (y = parte superior de la plataforma - 30)
-          this.checkpoints = [
-            new Checkpoint(900, -330),
-            new Checkpoint(550, -1230),
-            new Checkpoint(-125, -1530),
-          ];
+          // Crear objetos del nivel desde LEVEL_DATA
+          this.echoes = LEVEL_DATA.echoes.map(([x, y]) => new Echo(x, y));
+          this.hazards = LEVEL_DATA.hazards.map(([x, y, w, h]) => new Hazard(x, y, w, h));
+          this.drones = LEVEL_DATA.drones.map(([x, y, r]) => new HunterDrone(x, y, r));
+          this.checkpoints = LEVEL_DATA.checkpoints.map(([x, y]) => new Checkpoint(x, y));
+          this.signs = LEVEL_DATA.signs.map(([x, y, t]) => new Sign(x, y, t));
         }
         initParallax() {
           this.parallaxLayers.push(
@@ -1826,6 +1878,7 @@
             layer.draw(this.ctx, this.camera, this.width, this.height)
           );
           this._drawLevel();
+          this.signs.forEach((s) => s.draw(this.ctx, this.camera, this.player));
           this.goal.draw(this.ctx, this.camera);
           this.checkpoints.forEach((c) => c.draw(this.ctx, this.camera));
           this.hazards.forEach((h) => h.draw(this.ctx, this.camera));

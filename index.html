@@ -277,6 +277,90 @@
         text-transform: uppercase;
       }
 
+      /* --- CRONÓMETRO DEL HUD --- */
+      .hud-timer {
+        margin-top: 6px;
+        font-family: monospace;
+        font-size: 0.8rem;
+        color: rgba(212, 240, 255, 0.7);
+        letter-spacing: 2px;
+      }
+
+      /* --- PANTALLA FINAL --- */
+      #end-screen {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%) scale(0.95);
+        width: min(360px, calc(100vw - 32px));
+        box-sizing: border-box;
+        background: rgba(5, 10, 15, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-top: 2px solid #00ff88;
+        border-radius: 10px;
+        padding: 30px;
+        text-align: center;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
+        backdrop-filter: blur(15px);
+        opacity: 0;
+        pointer-events: none;
+        transition: all 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      }
+      #end-screen.active {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1);
+        pointer-events: auto;
+      }
+      .end-title {
+        font-size: 1.3rem;
+        font-weight: 300;
+        letter-spacing: 5px;
+        color: #fff;
+        text-shadow: 0 0 25px rgba(0, 255, 136, 0.5);
+      }
+      .end-sub {
+        font-size: 0.8rem;
+        color: #8faab5;
+        margin: 8px 0 24px;
+        letter-spacing: 1px;
+      }
+      .end-stats {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-bottom: 20px;
+      }
+      .end-stat {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 6px;
+        padding: 12px 6px;
+      }
+      .end-stat.wide {
+        grid-column: span 2;
+      }
+      .end-stat-label {
+        font-size: 0.65rem;
+        letter-spacing: 2px;
+        color: #8faab5;
+      }
+      .end-stat-value {
+        font-family: monospace;
+        font-size: 1.4rem;
+        color: #d4f0ff;
+        margin-top: 4px;
+      }
+      #end-record {
+        display: none;
+        font-size: 0.7rem;
+        letter-spacing: 3px;
+        color: #00ff88;
+        margin-top: 4px;
+      }
+      #end-record.visible {
+        display: block;
+      }
+
       /* Pantalla de carga */
       #loading-screen {
         position: absolute;
@@ -340,6 +424,7 @@
           <div class="energy-bar-bg">
             <div id="energy-bar-fill" class="energy-bar-fill"></div>
           </div>
+          <div class="hud-timer" id="hud-timer">00:00.0</div>
         </div>
         <button id="menu-btn">II</button>
       </div>
@@ -369,6 +454,29 @@
           onclick="gameInstance.restartLevel('REINICIO MANUAL', true)"
         >
           REINICIAR
+        </button>
+      </div>
+
+      <div id="end-screen">
+        <div class="end-title">NÚCLEO SINCRONIZADO</div>
+        <div class="end-sub">Luma ha despertado al Golem Estelar</div>
+        <div class="end-stats">
+          <div class="end-stat">
+            <div class="end-stat-label">TIEMPO</div>
+            <div class="end-stat-value" id="end-time">00:00.0</div>
+          </div>
+          <div class="end-stat">
+            <div class="end-stat-label">CAÍDAS</div>
+            <div class="end-stat-value" id="end-deaths">0</div>
+          </div>
+          <div class="end-stat wide">
+            <div class="end-stat-label">MEJOR TIEMPO</div>
+            <div class="end-stat-value" id="end-best">--:--.-</div>
+            <div id="end-record">¡NUEVO RÉCORD!</div>
+          </div>
+        </div>
+        <button class="btn-primary" onclick="gameInstance.playAgain()">
+          JUGAR DE NUEVO
         </button>
       </div>
 
@@ -507,6 +615,13 @@
           [6250, 260, "LOS DRONES TE PERSIGUEN  ·  NO TE DETENGAS"],
         ],
       };
+
+      // Formatea segundos como mm:ss.d
+      function formatTime(seconds) {
+        const m = Math.floor(seconds / 60);
+        const s = seconds - m * 60;
+        return `${String(m).padStart(2, "0")}:${s.toFixed(1).padStart(4, "0")}`;
+      }
 
       // --- Utilidades Matemáticas (Vectores 2D) ---
       const V2 = {
@@ -1697,6 +1812,8 @@
           this.lastTime = null;
           this.accumulator = 0;
           this.notifTimer = null;
+          // Estadísticas de la partida (tiempo en ticks de juego, no se cuenta la pausa)
+          this.stats = { ticks: 0, deaths: 0 };
 
           // Nivel construido desde LEVEL_DATA
           this.level = {
@@ -1714,6 +1831,8 @@
             energyFill: document.getElementById("energy-bar-fill"),
             energyText: document.getElementById("energy-text"),
             energyHud: document.getElementById("energy-hud"),
+            timer: document.getElementById("hud-timer"),
+            endScreen: document.getElementById("end-screen"),
           };
 
           this._initUI();
@@ -1802,23 +1921,50 @@
           if (this.gameState === "WON") return;
           this.audio.playDeath();
           this.resetLevel(full);
+          if (full) this.stats = { ticks: 0, deaths: 0 };
+          else this.stats.deaths++;
           this.showNotification("ERROR CRÍTICO", reason, "#ff8888");
           if (this.paused) this.togglePause();
         }
         winLevel() {
           if (this.gameState === "WON") return;
-          this.gameState = "WON"; // Congela la lógica mientras se muestra el mensaje
+          this.gameState = "WON"; // Congela la lógica mientras se muestra la pantalla final
           this.audio.playWin();
-          this.showNotification(
-            "SINCRONIZACIÓN EXITOSA",
-            "NÚCLEO CONECTADO",
-            "#88ff88",
-            2500
-          );
-          setTimeout(() => this.resetLevel(true), 3000);
+
+          const time = this.stats.ticks / CONFIG.TICK_RATE;
+          // Mejor tiempo guardado en este navegador (puede no estar disponible: modo privado, etc.)
+          let best = NaN;
+          try {
+            best = parseFloat(localStorage.getItem("aether.bestTime"));
+          } catch (e) {}
+          const isRecord = !(best > 0) || time < best;
+          if (isRecord) {
+            best = time;
+            try {
+              localStorage.setItem("aether.bestTime", String(time));
+            } catch (e) {}
+          }
+          document.getElementById("end-time").innerText = formatTime(time);
+          document.getElementById("end-deaths").innerText = this.stats.deaths;
+          document.getElementById("end-best").innerText = formatTime(best);
+          document
+            .getElementById("end-record")
+            .classList.toggle("visible", isRecord);
+          setTimeout(() => this.ui.endScreen.classList.add("active"), 1200);
+        }
+        playAgain() {
+          this.ui.endScreen.classList.remove("active");
+          this.resetLevel(true);
+          this.stats = { ticks: 0, deaths: 0 };
+          this.ui.timer.innerText = formatTime(0);
         }
         update() {
           if (this.paused || this.gameState === "WON") return;
+          this.stats.ticks++;
+          if (this.stats.ticks % 6 === 0)
+            this.ui.timer.innerText = formatTime(
+              this.stats.ticks / CONFIG.TICK_RATE
+            );
           if (this.goal.checkCollision(this.player)) {
             this.winLevel();
             return;

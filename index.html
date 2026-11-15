@@ -540,6 +540,22 @@
         bgFar: "Imagenes/capa0.png",
         bgMid: "Imagenes/capa1.png",
         floor: "Imagenes/capa2.jpeg",
+        luma: "Imagenes/sprite-orbe/luma.png",
+      };
+
+      // Atlas de Luma (generado con tools/build_luma.py): 8 frames en una fila.
+      // El sprite "mira" hacia la izquierda (estela a la derecha); se voltea al ir a la derecha.
+      const LUMA_SPRITE = {
+        FRAME_W: 315,
+        FRAME_H: 140,
+        ANCHOR_X: 65, // Centro del núcleo dentro del frame
+        ANCHOR_Y: 100,
+        SCALE: 0.8, // Núcleo de ~44 px: casi igual al radio de colisión (25), ya no "flota"
+        IDLE: [0, 1, 2, 3], // Estela hacia arriba (reposo, caída, subida)
+        SLOW: 4,
+        MEDIUM: 5,
+        FAST: 6,
+        FASTEST: 7,
       };
       const IMAGES = {};
       function loadAssets(onComplete) {
@@ -1084,6 +1100,11 @@
           // Variables para Squash & Stretch (Deformación)
           this.scaleX = 1;
           this.scaleY = 1;
+          // Animación del sprite
+          this.facing = -1; // -1 = izquierda (orientación original del sprite), 1 = derecha
+          this.tilt = 0; // Inclinación según la dirección del movimiento
+          this.animTick = 0;
+          this.spriteFrame = 0;
         }
         respawn() {
           this.pos = { ...this.respawnPos };
@@ -1408,6 +1429,60 @@
           // Restaurar la forma original (elasticidad suave)
           this.scaleX += (1 - this.scaleX) * 0.1;
           this.scaleY += (1 - this.scaleY) * 0.1;
+
+          this._updateSpriteAnim();
+        }
+
+        // Elige el frame según la velocidad HORIZONTAL (la estela de los frames rápidos
+        // es horizontal). En caídas o subidas se usan los frames de reposo (estela hacia arriba).
+        _updateSpriteAnim() {
+          const S = LUMA_SPRITE;
+          const hs = Math.abs(this.vel.x);
+          this.animTick++;
+          if (hs > 0.5) this.facing = this.vel.x > 0 ? 1 : -1;
+
+          let targetTilt = 0;
+          if (hs < 2) {
+            this.spriteFrame = S.IDLE[Math.floor(this.animTick / 8) % S.IDLE.length];
+          } else {
+            if (hs < 5) this.spriteFrame = S.SLOW;
+            else if (hs < 9) this.spriteFrame = S.MEDIUM;
+            else if (hs < 13) this.spriteFrame = S.FAST;
+            else this.spriteFrame = S.FASTEST;
+            // Inclinar hacia donde se mueve (positivo = bajando), máximo 35°
+            targetTilt = V2.clamp(Math.atan2(this.vel.y, hs), -0.6, 0.6);
+          }
+          this.tilt += (targetTilt - this.tilt) * 0.2;
+        }
+
+        // Dibuja el sprite de Luma. Devuelve false si la imagen no está disponible.
+        _drawSprite(ctx) {
+          const img = IMAGES.luma;
+          if (!img || img.isBroken || !img.complete || img.naturalWidth === 0)
+            return false;
+          const S = LUMA_SPRITE;
+          ctx.save();
+          ctx.globalCompositeOperation = "source-over"; // "lighter" borraría los ojos oscuros
+          // Si se daña, parpadea durante la invulnerabilidad
+          if (this.invulnerable > 0 && Math.floor(this.invulnerable / 4) % 2 === 0)
+            ctx.globalAlpha = 0.4;
+          // El sprite mira a la izquierda: se voltea al ir a la derecha.
+          // La inclinación se aplica en el espacio del sprite, así funciona en ambos sentidos.
+          ctx.scale(-this.facing, 1);
+          ctx.rotate(-this.tilt);
+          ctx.drawImage(
+            img,
+            this.spriteFrame * S.FRAME_W,
+            0,
+            S.FRAME_W,
+            S.FRAME_H,
+            -S.ANCHOR_X * S.SCALE,
+            -S.ANCHOR_Y * S.SCALE,
+            S.FRAME_W * S.SCALE,
+            S.FRAME_H * S.SCALE
+          );
+          ctx.restore();
+          return true;
         }
 
         draw(ctx, camera) {
@@ -1457,6 +1532,12 @@
           ctx.translate(viewX, viewY);
           ctx.scale(this.scaleX, this.scaleY); // AQUI SE APLICA LA DEFORMACIÓN (Squash & Stretch)
 
+          if (this._drawSprite(ctx)) {
+            ctx.restore();
+            return;
+          }
+
+          // --- Respaldo procedural (si el sprite no cargó) ---
           // 1. Halo Externo Suave
           ctx.shadowBlur = 20;
           ctx.shadowColor = "#00ffff";
